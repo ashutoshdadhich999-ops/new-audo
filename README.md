@@ -1,13 +1,54 @@
 # Spiking vs Non-Spiking Residual Denoising
 
-> **Note:** This README is a working draft. Structure/style will be updated to match the sample format once provided.
+A controlled comparison between a spiking neural network (SNN) and a
+topologically matched non-spiking (ANN) residual denoiser, evaluated on two
+modalities — noisy MNIST digits and noisy speech waveforms — to isolate the
+effect of spiking (LIF) dynamics on denoising quality, latency, and
+activation sparsity.
 
-A controlled comparison between **spiking neural network (SNN)** and matched **non-spiking (ANN)** residual denoisers, evaluated on two modalities:
+## Overview
 
-- **Image (MNIST):** diffusion-noised digits, denoised via epsilon-prediction.
-- **Audio (SpeechCommands):** Poisson spiking-sensor-style corrupted waveforms, denoised via residual prediction.
+Diffusion-style corruption processes are commonly denoised with standard
+convolutional ANNs. This project asks a narrower question: **if you swap
+the nonlinearity in a residual denoiser's blocks from a standard activation
+(SiLU) to spiking Leaky-Integrate-and-Fire (LIF) neurons — keeping the
+conv/norm/skip topology and parameter budget otherwise identical — what do
+you gain or lose?**
 
-Both branches use topologically matched spiking/non-spiking backbones so the only real variable is the neuron model (LIF spiking vs. SiLU-activated ANN), isolating the effect of spiking dynamics on denoising quality, latency, and activation sparsity.
+Two independent branches test this on different signal types:
+
+- **Image branch (MNIST):** a Gaussian diffusion forward process corrupts
+  digits; the network predicts the added noise (standard epsilon-prediction).
+- **Audio branch (SpeechCommands):** a Poisson spike-count sensor model
+  corrupts waveforms (simulating a degraded neuromorphic/cochlea-like
+  sensor); the network predicts the residual (`noisy − clean`).
+
+In both branches, the spiking model and its non-spiking counterpart share
+the same encoder/decoder, channel widths, and time-conditioning — the only
+difference is the neuron model inside each residual block.
+
+**Headline result:** *pending a full training run — see [Usage](#usage) to
+reproduce, and [`REPORT.md`](REPORT.md) for the full write-up once
+populated with real run output.*
+
+See [`REPORT.md`](REPORT.md) for the full write-up, including the fixes
+applied to the original experimental script, the evaluation methodology,
+and honestly-reported limitations.
+
+## Architecture
+
+- **Spiking residual block** — Conv → GroupNorm → LIF neuron (surrogate
+  gradient, `fast_sigmoid`), unrolled over `N` internal timesteps per block
+  and rate-averaged, with a skip connection.
+- **Non-spiking residual block** — identical Conv/GroupNorm topology with a
+  SiLU activation in place of the LIF neuron; no internal unroll.
+- **Time conditioning** — sinusoidal timestep embedding (image branch) /
+  learned scalar embedding (audio branch), projected and added inside every
+  block, matched identically between spiking and non-spiking variants.
+- **Image backbone** — 3-block conv residual stack, channel width doubling
+  at block 2 (`32 → 64 → 64`).
+- **Audio backbone** — 3-block 1D conv residual stack at constant width
+  (`64` channels).
 
 ## Repository Structure
 
@@ -25,50 +66,79 @@ Both branches use topologically matched spiking/non-spiking backbones so the onl
 │   ├── train.py             # Training loops
 │   ├── evaluate.py          # Paired evaluation, sparsity, latency measurement
 │   └── visualize.py         # Figure generation (saved to outputs/figures/)
-└── outputs/                 # Created at runtime: figures + logs (gitignored)
+├── outputs/                 # Created at runtime: figures + logs (gitignored)
+├── REPORT.md                # Full technical report
+└── LICENSE
 ```
 
-## Setup
+## Installation
 
 ```bash
-python -m venv venv && source venv/bin/activate   # optional
 pip install -r requirements.txt
 ```
 
 ## Usage
 
+Run the full comparison (both branches, default hyperparameters):
+
 ```bash
-# Full run (both branches, default hyperparameters)
 python main.py
+```
 
-# Only one branch
-python main.py --skip-audio
-python main.py --skip-image
+Run a single branch only:
 
-# Quick smoke test
+```bash
+python main.py --skip-audio     # image branch only
+python main.py --skip-image     # audio branch only
+```
+
+Quick smoke test (few epochs, small audio subset):
+
+```bash
 python main.py --epochs-img 2 --epochs-audio 2 --audio-subset-size 500
 ```
 
-All hyperparameters (batch size, epochs, learning rate, timesteps, etc.) are exposed via CLI flags — run `python main.py --help` for the full list.
+All hyperparameters (batch size, epochs, learning rate, diffusion
+timesteps, internal spiking steps, etc.) are exposed via CLI flags — run
+`python main.py --help` for the full list. Figures are written to
+`outputs/figures/`.
 
-## Method Summary
+## Results
 
-| | Image | Audio |
-|---|---|---|
-| Corruption | Gaussian diffusion forward process | Poisson spike-count sensor model + Gaussian jitter |
-| Objective | Predict added noise (`epsilon`) | Predict residual (`noisy - clean`) |
-| Spiking block | LIF neurons, rate-coded over `N` internal steps | LIF neurons, rate-coded over `N` internal steps |
-| Baseline | Matched ANN block (SiLU) | Matched ANN block (SiLU) |
+*To be filled in after a full run of `main.py`* (see [`REPORT.md`](REPORT.md)
+for the reporting template and methodology this table will follow):
 
-## Fixes Applied to the Original Script
+| Branch | Metric | Spiking | Non-Spiking |
+|---|---|---|---|
+| Image (MNIST) | Denoised MSE / Improvement % | — | — |
+| Audio (SpeechCommands) | SI-SDR Improvement (dB) | — | — |
+| Audio (SpeechCommands) | SNR Improvement (dB) | — | — |
+| Audio (SpeechCommands) | Spike rate / Sparsity | — | 1.0 / 0.0 (dense, by definition) |
+| Audio (SpeechCommands) | Latency (ms/sample) | — | — |
 
-This version corrects a few issues found in the original monolithic notebook code:
+## Limitations
 
-1. **Fair spiking vs. non-spiking comparison** — both models in each branch are now evaluated on the *same* random noise draw (seeded), instead of independently sampled noise, removing an extra source of variance from the comparison.
-2. **Sparsity/latency measured on realistic input** — `measure_sparsity` and `measure_time` now feed the audio models their actual corrupted ("noisy") input, matching what they were trained on, instead of the clean waveform.
-3. **Explicit diffusion horizon** — `Diffusion(T=...)` is now passed explicitly rather than relying on a constructor default that happened to match the timestep constant.
-4. **Explicit clamp bounds** — the Poisson rate in the audio corruption process is clamped with an explicit `min`/`max` instead of a lower bound only.
-5. **Script-safe plotting** — figures are saved to `outputs/figures/` instead of relying on interactive `plt.show()`.
+This is a small-scale exploratory comparison, not a publication-ready
+paper. Notable open items (detailed in `REPORT.md`):
+- Single-seed by default; `main.py` does not yet run a multi-seed ablation
+  the way the results table above implies it should for statistical
+  reliability.
+- The audio corruption process is a custom Poisson spiking-sensor model,
+  not a standard Gaussian diffusion process — results are not directly
+  comparable to published audio-diffusion denoising benchmarks.
+- No comparison yet against established non-spiking denoising baselines
+  from the literature (only the matched-topology ANN ablation included here).
+- Evaluated on MNIST and a subset of SpeechCommands only; no test on
+  natural images or full-length/real-world noisy audio.
+
+## References
+
+- Ho, J., Jain, A., & Abbeel, P. (2020). Denoising Diffusion Probabilistic
+  Models. *NeurIPS*.
+- Eshraghian, J. K., et al. (2021). Training Spiking Neural Networks Using
+  Lessons from Deep Learning. *arXiv:2109.12894* (snnTorch).
+- Le Roux, N., et al. (2023). SI-SDR: Half-baked or well done? *ICASSP*
+  (metric background).
 
 ## License
 
